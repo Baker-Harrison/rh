@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
+  <title>Harness</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="drag"></div>
+  <main id="thread"></main>
+  <div id="dock">
+    <form id="composer">
+      <div id="folder-wrap">
+        <button type="button" id="folder" aria-label="Choose folder" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3.5 8.2A2.2 2.2 0 0 1 5.7 6h3.05l1.45 1.7H18.3A2.2 2.2 0 0 1 20.5 9.9v7.4a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2V8.2Z" />
+          </svg>
+        </button>
+        <span id="folder-name" hidden></span>
+      </div>
+      <textarea id="input" rows="1" placeholder="Message" autocomplete="off"></textarea>
+      <button type="submit" id="send" aria-label="Send" disabled>
+        <svg class="arrow" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 18.25V6.75M12 6.75 7.25 11.5M12 6.75l4.75 4.75" />
+        </svg>
+        <svg class="stop" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="7.25" y="7.25" width="9.5" height="9.5" rx="1.6" />
+        </svg>
+      </button>
+    </form>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>
