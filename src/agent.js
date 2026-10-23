@@ -1,4 +1,5 @@
 const { TOOL_DEFINITIONS, AgentStop, toolLabel } = require('./tools');
+const { DEFAULT_LIMITS, splitForSummary, chunkMessages } = require('./context');
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const MAX_ROUNDS = 24;
@@ -159,13 +160,114 @@ async function streamCompletion({ apiKey, model, messages, signal, onText }) {
   return message;
 }
 
-function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
-  const history = [];
+const SUMMARY_INSTRUCTION = [
+  'Summarize this coding session so it can continue inside a later context window.',
+  'Keep the user goals, decisions, files changed, commands and their results, open errors, and the unfinished task.',
+  'Keep file paths and exact identifiers. Leave out chatter.',
+].join(' ');
+
+function renderTranscript(messages) {
+  return messages.map((message) => {
+    const parts = [`${message.role}:`];
+    if (message.content) parts.push(message.content);
+    if (message.tool_calls) parts.push(JSON.stringify(message.tool_calls));
+    if (message.tool_call_id) parts.push(`tool_call_id ${message.tool_call_id}`);
+    return parts.join('\n');
+  }).join('\n\n');
+}
+
+async function completePlain({ apiKey, model, messages, signal }) {
+  const response = await fetch(ENDPOINT, {
+    method: 'POST',
+    signal,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'http://localhost',
+      'X-Title': 'Harness',
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      temperature: 0.2,
+      max_tokens: 4096,
+    }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  const body = await response.json();
+  if (body.error) throw new Error(body.error.message || 'Summary failed');
+  return body.choices?.[0]?.message?.content || '';
+}
+
+async function summarizeHistory({ apiKey, model, messages, signal, limits }) {
+  const chunks = chunkMessages(messages, limits.chunkTokens);
+  let summary = '';
+  for (const chunk of chunks) {
+    const sections = [];
+    if (summary) sections.push(`Existing summary:\n${summary}`);
+    sections.push(`Transcript:\n${renderTranscript(chunk)}`);
+    summary = await completePlain({
+      apiKey,
+      model,
+      signal,
+      messages: [
+        { role: 'system', content: SUMMARY_INSTRUCTION },
+        { role: 'user', content: sections.join('\n\n') },
+      ],
+    });
+  }
+  return summary.trim();
+}
+
+function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], persist, limits = DEFAULT_LIMITS }) {
   let controller = null;
   let running = false;
 
+  function save() {
+    if (persist) persist(history);
+  }
+
   function requestMessages() {
-    return [{ role: 'system', content: systemPrompt(getRoot()) }, ...history];
+    const summary = history.find((message) => message.role === 'summary');
+    const system = [
+      systemPrompt(getRoot()),
+      summary ? `Conversation so far:\n${summary.content}` : '',
+    ].filter(Boolean).join('\n\n');
+    const messages = history
+      .filter((message) => message.role !== 'summary')
+      .map((message) => {
+        if (message.role === 'tool') {
+          return { role: 'tool', tool_call_id: message.tool_call_id, content: message.content || '' };
+        }
+        if (message.role === 'assistant') {
+          return {
+            role: 'assistant',
+            content: message.content ?? null,
+            ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+            ...(message.reasoning ? { reasoning: message.reasoning } : {}),
+            ...(message.reasoning_details ? { reasoning_details: message.reasoning_details } : {}),
+          };
+        }
+        return { role: message.role, content: message.content || '' };
+      });
+    return [{ role: 'system', content: system }, ...messages];
+  }
+
+  async function maybeSummarize() {
+    const split = splitForSummary(history, limits);
+    if (!split) return;
+    emit({ type: 'summary', state: 'running' });
+    const content = await summarizeHistory({
+      apiKey,
+      model,
+      messages: split.old,
+      signal: controller.signal,
+      limits,
+    });
+    if (!content) throw new Error('Summary came back empty');
+    history.splice(0, history.length, { role: 'summary', content }, ...split.recent);
+    save();
+    emit({ type: 'summary', state: 'done' });
   }
 
   async function send(text) {
@@ -177,6 +279,7 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
     controller = new AbortController();
     const turnId = `${Date.now()}`;
     history.push({ role: 'user', content: text });
+    save();
     emit({ type: 'turn-start', id: turnId });
 
     const aborting = () => controller.signal.aborted;
@@ -185,6 +288,8 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
       let round = 0;
       while (round < MAX_ROUNDS) {
         round += 1;
+        if (aborting()) return;
+        await maybeSummarize();
         if (aborting()) return;
         const roundCheckpoint = history.length;
         let message;
@@ -205,10 +310,12 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
         const calls = message.tool_calls || [];
         if (!calls.length) {
           history.push(message);
+          save();
           return;
         }
 
         history.push(message);
+        save();
         try {
           for (const call of calls) {
             if (aborting()) {
@@ -242,6 +349,7 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
               tool_call_id: call.id,
               content: String(result),
             });
+            save();
           }
         } catch (error) {
           history.splice(roundCheckpoint);
@@ -253,6 +361,7 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
       if (error instanceof AgentStop || aborting() || error.name === 'AbortError') return;
       emit({ type: 'error', id: turnId, message: error.message || 'Request failed' });
     } finally {
+      save();
       running = false;
       controller = null;
       emit({ type: 'turn-end', id: turnId });
@@ -283,6 +392,11 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
       return `replay-${turn}`;
     };
     for (const message of history) {
+      if (message.role === 'summary') {
+        close();
+        events.push({ type: 'summary', state: 'done' });
+        continue;
+      }
       if (message.role === 'user') {
         close();
         events.push({ type: 'user', text: typeof message.content === 'string' ? message.content : '' });
@@ -309,4 +423,4 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit }) {
   return { send, stop, replay };
 }
 
-module.exports = { createAgent };
+module.exports = { createAgent, splitForSummary };

@@ -267,6 +267,11 @@ window.harness.onEvent((event) => {
     setUpdate(event.state);
     return;
   }
+  if (event.type === 'summary') {
+    showSummary(event.state);
+    scrollDown(true);
+    return;
+  }
   if (event.type === 'user') {
     addUser(event.text);
     return;
@@ -339,6 +344,18 @@ composer.addEventListener('submit', async (event) => {
     setRunning(false);
   }
 });
+
+function showSummary(state) {
+  let note = document.getElementById('summary-note');
+  if (!note) {
+    note = document.createElement('div');
+    note.id = 'summary-note';
+    note.className = 'tool summary';
+    thread.appendChild(note);
+  }
+  note.textContent = state === 'running' ? 'Summarizing earlier context' : 'Summarized earlier context';
+  note.classList.toggle('running', state === 'running');
+}
 
 function dragWindow(event, surface) {
   if (event.button !== 0) return;

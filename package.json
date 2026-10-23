@@ -1,6 +1,6 @@
 {
   "name": "harness",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "main": "src/main.js",
   "author": "Baker-Harrison",
@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "electron .",
+    "test": "ELECTRON_RUN_AS_NODE=1 electron test/run.js",
     "dist": "electron-builder --mac",
     "release": "electron-builder --mac --publish always"
   },
@@ -29,7 +30,10 @@
         "dmg",
         "zip"
       ],
-      "identity": null,
+      "identity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "gatekeeperAssess": false
     },
     "publish": {

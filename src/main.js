@@ -4,6 +4,7 @@ const path = require('path');
 const { createAgent } = require('./agent');
 const { createToolbox } = require('./tools');
 const { setupUpdates } = require('./updates');
+const { openStore } = require('./store');
 
 app.setName('Harness');
 
@@ -65,13 +66,16 @@ function emit(event) {
 
 const config = loadConfig();
 const toolbox = createToolbox(() => folder);
-const agent = createAgent({
-  apiKey: config.apiKey,
-  model: config.model,
-  getRoot: () => folder,
-  toolbox,
-  emit,
-});
+let store = null;
+let agent = {
+  async send() {
+    throw new Error('The harness is still starting');
+  },
+  stop() {},
+  replay() {
+    return [];
+  },
+};
 
 function createWindow() {
   win = new BrowserWindow({
@@ -165,7 +169,7 @@ ipcMain.handle('select-folder', async () => {
 
 ipcMain.handle('send-message', async (_event, text) => {
   if (typeof text !== 'string' || !text.trim()) return { ok: false };
-  if (!config.apiKey) {
+  if (!store || !store.getApiKey()) {
     emit({ type: 'error', id: 'config', message: 'Set OPENROUTER_API_KEY.' });
     return { ok: false };
   }
@@ -194,7 +198,18 @@ ipcMain.handle('install-update', () => {
 });
 
 app.whenReady().then(() => {
+  store = openStore(path.join(app.getPath('userData'), 'harness.db'));
+  if (process.env.OPENROUTER_API_KEY) store.setApiKey(process.env.OPENROUTER_API_KEY);
   folder = loadFolder();
+  agent = createAgent({
+    apiKey: store.getApiKey(),
+    model: config.model,
+    getRoot: () => folder,
+    toolbox,
+    emit,
+    history: store.loadMessages(),
+    persist: (messages) => store.saveMessages(messages),
+  });
   applicationMenu();
   createWindow();
   updates = setupUpdates({ app, emit });

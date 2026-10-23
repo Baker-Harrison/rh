@@ -19,7 +19,25 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx electron-builder --mac --publish always
+      - run: npm test
+        env:
+          ELECTRON_RUN_AS_NODE: "1"
+      - run: npx electron-builder --mac --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Verify the app signature
+        run: |
+          set -euo pipefail
+          APP=$(find dist -name 'Harness.app' -type d | head -1)
+          test -n "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv "$APP" 2>&1 | tee /tmp/codesign.txt
+          grep -q "Signature=adhoc" /tmp/codesign.txt
+      - name: Publish
+        run: |
+          set -euo pipefail
+          APP=$(find dist -name 'Harness.app' -type d | head -1)
+          npx electron-builder --prepackaged "$APP" --mac --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
