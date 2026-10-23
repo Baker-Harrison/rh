@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { createAgent } = require('./agent');
 const { createToolbox } = require('./tools');
+const { setupUpdates } = require('./updates');
 
 app.setName('Harness');
 
@@ -55,7 +56,10 @@ function saveFolder(next) {
   }
 }
 
+let pendingUpdate = null;
+
 function emit(event) {
+  if (event.type === 'update') pendingUpdate = event.state === 'hidden' ? null : event;
   if (win && !win.isDestroyed()) win.webContents.send('agent-event', event);
 }
 
@@ -97,6 +101,7 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     emit(folderInfo());
     for (const event of agent.replay()) emit(event);
+    if (pendingUpdate) emit(pendingUpdate);
   });
   win.loadFile(path.join(__dirname, 'index.html'));
 }
@@ -182,10 +187,17 @@ ipcMain.handle('open-external', (_event, url) => {
   if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
 });
 
+let updates = { install() {} };
+
+ipcMain.handle('install-update', () => {
+  updates.install();
+});
+
 app.whenReady().then(() => {
   folder = loadFolder();
   applicationMenu();
   createWindow();
+  updates = setupUpdates({ app, emit });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

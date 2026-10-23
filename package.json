@@ -3,10 +3,46 @@
   "version": "1.0.0",
   "private": true,
   "main": "src/main.js",
+  "author": "Baker-Harrison",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Baker-Harrison/rh.git"
+  },
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder --mac",
+    "release": "electron-builder --mac --publish always"
+  },
+  "build": {
+    "appId": "com.bakerharrison.rh",
+    "productName": "Harness",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": null,
+      "gatekeeperAssess": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Baker-Harrison",
+      "repo": "rh"
+    }
   },
   "devDependencies": {
-    "electron": "^45.0.0"
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

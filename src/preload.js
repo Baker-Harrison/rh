@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('harness', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   dragBy: (dx, dy) => ipcRenderer.send('drag-by', dx, dy),
   zoom: () => ipcRenderer.send('zoom-window'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
   onEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('agent-event', listener);

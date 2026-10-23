@@ -263,6 +263,10 @@ window.harness.onEvent((event) => {
     setFolder(event);
     return;
   }
+  if (event.type === 'update') {
+    setUpdate(event.state);
+    return;
+  }
   if (event.type === 'user') {
     addUser(event.text);
     return;
@@ -358,8 +362,34 @@ function dragWindow(event, surface) {
   surface.addEventListener('pointercancel', onUp);
 }
 
+const updateBtn = document.getElementById('update');
+let updateState = 'hidden';
+
+function setUpdate(state) {
+  updateState = state;
+  const visible = state === 'available' || state === 'downloading' || state === 'downloaded';
+  updateBtn.hidden = !visible;
+  updateBtn.classList.toggle('downloading', state === 'downloading');
+  updateBtn.disabled = state === 'downloading';
+  const label = state === 'downloaded'
+    ? 'Restart to update'
+    : state === 'downloading'
+      ? 'Downloading update'
+      : 'Update';
+  updateBtn.setAttribute('aria-label', label);
+  updateBtn.title = label;
+}
+
+updateBtn.addEventListener('pointerdown', (event) => event.stopPropagation());
+updateBtn.addEventListener('dblclick', (event) => event.stopPropagation());
+updateBtn.addEventListener('click', () => {
+  if (updateState === 'downloading') return;
+  window.harness.installUpdate();
+});
+
 const drag = document.getElementById('drag');
 drag.addEventListener('pointerdown', (event) => {
+  if (event.target.closest('#update')) return;
   dragWindow(event, drag);
 });
 drag.addEventListener('dblclick', () => window.harness.zoom());

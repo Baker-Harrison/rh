@@ -34,9 +34,45 @@ body {
 #drag {
   flex: none;
   height: 72px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 0 16px 12px 0;
   -webkit-user-select: none;
   user-select: none;
   cursor: default;
+}
+
+#update {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--bar-border);
+  border-radius: 50%;
+  background: var(--bar);
+  color: var(--text);
+  cursor: pointer;
+}
+
+#update[hidden] { display: none; }
+
+#update svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#update:hover { background: #2a2a2a; }
+#update.downloading svg { animation: spin 0.9s linear infinite; }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 #thread {
@@ -278,4 +314,5 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .tool.running { animation: none; }
+  #update.downloading svg { animation: none; }
 }
