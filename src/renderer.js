@@ -4,10 +4,14 @@ const folderBtn = document.getElementById('folder');
 const folderName = document.getElementById('folder-name');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const keyForm = document.getElementById('key-form');
+const keyInput = document.getElementById('key-input');
+const keySave = document.getElementById('key-save');
 
 const turns = new Map();
 let running = false;
 let folderSelected = false;
+let keyPresent = false;
 
 function escapeHtml(value) {
   return value.replace(/[&<>"']/g, (char) => ({
@@ -20,10 +24,12 @@ function escapeHtml(value) {
 }
 
 function inlineFormat(value) {
-  return value
-    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  return value.split(/(`[^`\n]+`)/).map((part, index) => {
+    if (index % 2) return `<code>${part.slice(1, -1)}</code>`;
+    return part
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  }).join('');
 }
 
 function splitCells(line) {
@@ -80,15 +86,16 @@ function renderTable(headerLine, alignLine, bodyLines) {
 
 function renderMarkdown(source) {
   const fences = [];
+  const nonce = Math.random().toString(36).slice(2, 10);
   let text = source.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_match, _lang, code) => {
     const index = fences.length;
     fences.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
-    return `\n@@FENCE${index}@@\n`;
+    return `\n@@FENCE${nonce}_${index}@@\n`;
   });
   text = text.replace(/```([^\n`]*)\n?([\s\S]*)$/g, (_match, _lang, code) => {
     const index = fences.length;
     fences.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
-    return `\n@@FENCE${index}@@\n`;
+    return `\n@@FENCE${nonce}_${index}@@\n`;
   });
   text = escapeHtml(text);
 
@@ -110,7 +117,7 @@ function renderMarkdown(source) {
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    const fence = line.match(/^@@FENCE(\d+)@@$/);
+    const fence = line.match(new RegExp(`^@@FENCE${nonce}_(\\d+)@@$`));
     if (fence) {
       flushPara();
       flushList();
@@ -131,11 +138,11 @@ function renderMarkdown(source) {
       html += renderTable(line, next, body);
       continue;
     }
-    const heading = line.match(/^(#{1,3}) (.+)/);
+    const heading = line.match(/^(#{1,6}) (.+)/);
     if (heading) {
       flushPara();
       flushList();
-      const level = heading[1].length;
+      const level = Math.min(heading[1].length, 3);
       html += `<h${level}>${inlineFormat(heading[2])}</h${level}>`;
       continue;
     }
@@ -153,6 +160,7 @@ function renderMarkdown(source) {
       flushPara();
       continue;
     }
+    flushList();
     para.push(line);
   }
   flushPara();
@@ -166,6 +174,23 @@ function nearBottom() {
 
 function scrollDown(force) {
   if (force || nearBottom()) thread.scrollTop = thread.scrollHeight;
+}
+
+function syncKey() {
+  const ready = keyInput.value.trim().length > 0;
+  keySave.disabled = !ready;
+  keySave.classList.toggle('ready', ready);
+}
+
+function setKeyPresent(present) {
+  keyPresent = present;
+  keyForm.hidden = present;
+  if (present) {
+    keyInput.value = '';
+    syncKey();
+    return;
+  }
+  keyInput.focus();
 }
 
 function setFolder(state) {
@@ -223,10 +248,24 @@ function addUser(text) {
   article.appendChild(bubble);
   thread.appendChild(article);
   scrollDown(true);
+  return article;
+}
+
+function clearStatus(turn) {
+  turn.blocks.querySelector('.status')?.remove();
+}
+
+function setStatus(turn, text) {
+  clearStatus(turn);
+  const note = document.createElement('div');
+  note.className = 'note status';
+  note.textContent = text;
+  turn.blocks.appendChild(note);
 }
 
 function setText(turn, text) {
   if (!text) return;
+  clearStatus(turn);
   if (!turn.textEl) {
     turn.textEl = document.createElement('div');
     turn.textEl.className = 'text';
@@ -236,6 +275,7 @@ function setText(turn, text) {
 }
 
 function setTool(turn, toolId, label, state) {
+  clearStatus(turn);
   let chip = turn.tools.get(toolId);
   if (!chip) {
     chip = document.createElement('div');
@@ -263,6 +303,10 @@ window.harness.onEvent((event) => {
     setFolder(event);
     return;
   }
+  if (event.type === 'key') {
+    setKeyPresent(Boolean(event.present));
+    return;
+  }
   if (event.type === 'update') {
     setUpdate(event.state);
     return;
@@ -270,6 +314,10 @@ window.harness.onEvent((event) => {
   if (event.type === 'summary') {
     showSummary(event.state);
     scrollDown(true);
+    return;
+  }
+  if (event.type === 'running') {
+    setRunning(true);
     return;
   }
   if (event.type === 'user') {
@@ -281,6 +329,8 @@ window.harness.onEvent((event) => {
     turnEl(event.id);
   } else if (event.type === 'text') {
     setText(turnEl(event.id), event.text);
+  } else if (event.type === 'status') {
+    setStatus(turnEl(event.id), event.text);
   } else if (event.type === 'tool') {
     setTool(turnEl(event.id), event.toolId, event.label, event.state);
   } else if (event.type === 'error') {
@@ -298,6 +348,25 @@ thread.addEventListener('click', (event) => {
   if (!link) return;
   event.preventDefault();
   window.harness.openExternal(link.href);
+});
+
+keyInput.addEventListener('input', syncKey);
+
+keyForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const value = keyInput.value.trim();
+  if (!value) return;
+  keySave.disabled = true;
+  try {
+    const result = await window.harness.setKey(value);
+    if (result && result.ok === false) {
+      showError(null, 'Could not save the key');
+      syncKey();
+    }
+  } catch (error) {
+    showError(null, error.message || 'Could not save the key');
+    syncKey();
+  }
 });
 
 folderBtn.addEventListener('click', async () => {
@@ -326,6 +395,10 @@ composer.addEventListener('submit', async (event) => {
   }
   const text = input.value.trim();
   if (!text) return;
+  if (!keyPresent) {
+    setKeyPresent(false);
+    return;
+  }
   if (!folderSelected) {
     const result = await window.harness.selectFolder();
     setFolder(result);
@@ -334,10 +407,17 @@ composer.addEventListener('submit', async (event) => {
   input.value = '';
   resizeInput();
   syncSend();
-  addUser(text);
+  const bubble = addUser(text);
   setRunning(true);
   try {
-    await window.harness.send(text);
+    const result = await window.harness.send(text);
+    if (result && result.ok === false) {
+      bubble.remove();
+      if (!input.value) {
+        input.value = text;
+        resizeInput();
+      }
+    }
   } catch (error) {
     showError(null, error.message || 'Request failed');
   } finally {
@@ -347,6 +427,10 @@ composer.addEventListener('submit', async (event) => {
 
 function showSummary(state) {
   let note = document.getElementById('summary-note');
+  if (state === 'failed') {
+    note?.remove();
+    return;
+  }
   if (!note) {
     note = document.createElement('div');
     note.id = 'summary-note';

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('harness', {
   selectFolder: () => ipcRenderer.invoke('select-folder'),
+  setKey: (value) => ipcRenderer.invoke('set-api-key', value),
   send: (text) => ipcRenderer.invoke('send-message', text),
   stop: () => ipcRenderer.invoke('stop'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),

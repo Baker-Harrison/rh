@@ -12,6 +12,7 @@ function setupUpdates({ app, emit }) {
   autoUpdater.autoInstallOnAppQuit = false;
 
   autoUpdater.on('update-available', (info) => {
+    if (downloaded) return;
     available = true;
     downloaded = false;
     emit({ type: 'update', state: 'available', version: info.version });
@@ -41,6 +42,7 @@ function setupUpdates({ app, emit }) {
   });
 
   const check = () => {
+    if (downloaded) return;
     autoUpdater.checkForUpdates().catch(() => {});
   };
   check();

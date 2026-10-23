@@ -57,11 +57,16 @@ function splitForSummary(messages, limits = DEFAULT_LIMITS) {
   }
   let old = groups.slice(0, splitAt).flat();
   let recent = groups.slice(splitAt).flat();
-  if (!old.length && messages.length > 1) {
-    old = messages.slice(0, -1);
-    recent = messages.slice(-1);
+  if (old.every((message) => message.role === 'summary')) {
+    // One turn holds everything: cut before the last assistant round so a tool result keeps its call.
+    let cut = messages.length - 1;
+    while (cut > 0 && messages[cut].role !== 'assistant') cut -= 1;
+    if (cut > 0) {
+      old = messages.slice(0, cut);
+      recent = messages.slice(cut);
+    }
   }
-  if (!old.length) return null;
+  if (old.every((message) => message.role === 'summary')) return null;
   return { old, recent };
 }
 

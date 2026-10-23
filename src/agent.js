@@ -3,6 +3,37 @@ const { DEFAULT_LIMITS, splitForSummary, chunkMessages } = require('./context');
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const MAX_ROUNDS = 24;
+const STREAM_IDLE_MS = 90_000;
+const HEADER_TIMEOUT_MS = 120_000;
+
+function readOrIdle(reader, signal, idleMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reader.cancel().catch(() => {});
+      reject(new Error('The model stopped responding.'));
+    }, idleMs);
+    const finish = (fn, value) => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      fn(value);
+    };
+    const onAbort = () => {
+      reader.cancel().catch(() => {});
+      const error = new Error('Aborted');
+      error.name = 'AbortError';
+      finish(reject, error);
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    reader.read().then(
+      (result) => finish(resolve, result),
+      (error) => finish(reject, error),
+    );
+  });
+}
 
 function systemPrompt(folder) {
   return [
@@ -56,8 +87,61 @@ async function readError(response) {
   }
 }
 
-async function streamCompletion({ apiKey, model, messages, signal, onText }) {
-  const response = await fetch(ENDPOINT, {
+const RETRY_STATUSES = new Set([429, 502, 503, 504]);
+
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const error = new Error('Aborted');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function fetchWithTimeout(url, options, headerTimeoutMs) {
+  const own = new AbortController();
+  const relay = () => own.abort();
+  if (options.signal.aborted) relay();
+
+  options.signal.addEventListener('abort', relay, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    own.abort();
+  }, headerTimeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: own.signal });
+  } catch (error) {
+    if (timedOut && !options.signal.aborted) throw new Error('The model is not responding.');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    options.signal.removeEventListener('abort', relay);
+  }
+}
+
+async function fetchWithRetry(url, options, { retryDelayMs = 1500, attempts = 2, headerTimeoutMs = HEADER_TIMEOUT_MS } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    const response = await fetchWithTimeout(url, options, headerTimeoutMs);
+    if (response.ok || !RETRY_STATUSES.has(response.status) || attempt >= attempts) return response;
+    await response.text().catch(() => {});
+    await pause(retryDelayMs * attempt, options.signal);
+  }
+}
+
+async function streamCompletion({ apiKey, model, messages, signal, onText, onStatus, retryDelayMs, headerTimeoutMs }) {
+  const response = await fetchWithRetry(ENDPOINT, {
     method: 'POST',
     signal,
     headers: {
@@ -75,15 +159,27 @@ async function streamCompletion({ apiKey, model, messages, signal, onText }) {
       temperature: 0.2,
       max_tokens: 32768,
     }),
-  });
+  }, { retryDelayMs, headerTimeoutMs });
 
   if (!response.ok) {
     throw new Error(await readError(response));
   }
 
+  if ((response.headers.get('content-type') || '').includes('application/json')) {
+    const body = await response.json();
+    if (body.error) throw new Error(body.error.message || 'Request failed');
+    const reply = body.choices?.[0]?.message || {};
+    const text = typeof reply.content === 'string' ? reply.content : '';
+    if (text) onText(visible(text));
+    const message = { role: 'assistant', content: text || null };
+    if (reply.tool_calls?.length) message.tool_calls = reply.tool_calls;
+    return message;
+  }
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let announced = false;
   const acc = {
     content: '',
     reasoning: '',
@@ -114,10 +210,21 @@ async function streamCompletion({ apiKey, model, messages, signal, onText }) {
     }
     if (typeof delta.reasoning === 'string') acc.reasoning += delta.reasoning;
     if (typeof delta.reasoning_content === 'string') acc.reasoning += delta.reasoning_content;
+    if (!announced && acc.reasoning && !visible(acc.content).trim() && acc.toolCalls.size === 0) {
+      announced = true;
+      onStatus?.('Thinking');
+    }
     if (delta.reasoning_details) mergeReasoningDetails(acc.reasoningDetails, delta.reasoning_details);
     if (Array.isArray(delta.tool_calls)) {
       for (const call of delta.tool_calls) {
-        const index = call.index ?? 0;
+        let index = call.index;
+        if (index === undefined) {
+          const last = acc.toolCalls.size - 1;
+          const isNew = call.id && (last < 0 || acc.toolCalls.get(last).id !== call.id);
+          index = isNew ? acc.toolCalls.size : Math.max(last, 0);
+        }
+        const stored = acc.toolCalls.get(index);
+        if (stored?.id && call.id && stored.id !== call.id) index = Math.max(...acc.toolCalls.keys()) + 1;
         if (!acc.toolCalls.has(index)) {
           acc.toolCalls.set(index, { id: '', name: '', arguments: '' });
         }
@@ -130,7 +237,7 @@ async function streamCompletion({ apiKey, model, messages, signal, onText }) {
   };
 
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readOrIdle(reader, signal, STREAM_IDLE_MS);
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
@@ -177,7 +284,7 @@ function renderTranscript(messages) {
 }
 
 async function completePlain({ apiKey, model, messages, signal }) {
-  const response = await fetch(ENDPOINT, {
+  const response = await fetchWithTimeout(ENDPOINT, {
     method: 'POST',
     signal,
     headers: {
@@ -192,7 +299,7 @@ async function completePlain({ apiKey, model, messages, signal }) {
       temperature: 0.2,
       max_tokens: 4096,
     }),
-  });
+  }, HEADER_TIMEOUT_MS);
   if (!response.ok) throw new Error(await readError(response));
   const body = await response.json();
   if (body.error) throw new Error(body.error.message || 'Summary failed');
@@ -219,12 +326,18 @@ async function summarizeHistory({ apiKey, model, messages, signal, limits }) {
   return summary.trim();
 }
 
-function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], persist, limits = DEFAULT_LIMITS }) {
+function createAgent({ apiKey, getApiKey, model, getRoot, toolbox, emit, history = [], persist, limits = DEFAULT_LIMITS, retryDelayMs, headerTimeoutMs }) {
+  const currentKey = () => (getApiKey ? getApiKey() : apiKey);
   let controller = null;
   let running = false;
 
   function save() {
-    if (persist) persist(history);
+    if (!persist) return;
+    try {
+      persist(history);
+    } catch (error) {
+      emit({ type: 'error', id: 'save', message: `Could not save the thread: ${error.message}` });
+    }
   }
 
   function requestMessages() {
@@ -249,7 +362,16 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
           };
         }
         return { role: message.role, content: message.content || '' };
-      });
+      })
+      .reduce((merged, message) => {
+        const last = merged.at(-1);
+        if (message.role === 'user' && last?.role === 'user') {
+          last.content = `${last.content}\n\n${message.content}`;
+        } else {
+          merged.push(message);
+        }
+        return merged;
+      }, []);
     return [{ role: 'system', content: system }, ...messages];
   }
 
@@ -257,14 +379,20 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
     const split = splitForSummary(history, limits);
     if (!split) return;
     emit({ type: 'summary', state: 'running' });
-    const content = await summarizeHistory({
-      apiKey,
-      model,
-      messages: split.old,
-      signal: controller.signal,
-      limits,
-    });
-    if (!content) throw new Error('Summary came back empty');
+    let content;
+    try {
+      content = await summarizeHistory({
+        apiKey: currentKey(),
+        model,
+        messages: split.old,
+        signal: controller.signal,
+        limits,
+      });
+      if (!content) throw new Error('Summary came back empty');
+    } catch (error) {
+      emit({ type: 'summary', state: 'failed' });
+      throw error;
+    }
     history.splice(0, history.length, { role: 'summary', content }, ...split.recent);
     save();
     emit({ type: 'summary', state: 'done' });
@@ -295,11 +423,14 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
         let message;
         try {
           message = await streamCompletion({
-            apiKey,
+            apiKey: currentKey(),
             model,
             messages: requestMessages(),
             signal: controller.signal,
             onText: (value) => emit({ type: 'text', id: turnId, text: value }),
+            onStatus: (text) => emit({ type: 'status', id: turnId, text }),
+            retryDelayMs,
+            headerTimeoutMs,
           });
         } catch (error) {
           if (aborting() || error.name === 'AbortError') return;
@@ -311,15 +442,30 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
         if (!calls.length) {
           history.push(message);
           save();
+          if (!visible(message.content || '').trim()) {
+            emit({ type: 'error', id: turnId, message: 'The model stopped without a reply.' });
+          }
           return;
         }
 
         history.push(message);
         save();
         try {
+          const labels = new Map();
+          const answered = () => new Set(history.slice(roundCheckpoint).filter((m) => m.role === 'tool').map((m) => m.tool_call_id));
+          const stopRound = () => {
+            const done = answered();
+            for (const pending of calls) {
+              if (!done.has(pending.id)) {
+                history.push({ role: 'tool', tool_call_id: pending.id, content: 'Stopped by the user.' });
+                emit({ type: 'tool', id: turnId, toolId: pending.id, label: labels.get(pending.id) || pending.function.name || 'tool', state: 'error' });
+              }
+            }
+            save();
+          };
           for (const call of calls) {
             if (aborting()) {
-              history.splice(roundCheckpoint);
+              stopRound();
               return;
             }
             let args = {};
@@ -330,6 +476,7 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
             } catch {
               args = null;
             }
+            labels.set(call.id, label);
             emit({ type: 'tool', id: turnId, toolId: call.id, label, state: 'running' });
             let result;
             try {
@@ -338,7 +485,7 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
               emit({ type: 'tool', id: turnId, toolId: call.id, label, state: 'done' });
             } catch (error) {
               if (error instanceof AgentStop || aborting()) {
-                history.splice(roundCheckpoint);
+                stopRound();
                 return;
               }
               result = `Error: ${error.message}`;
@@ -361,9 +508,9 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
       if (error instanceof AgentStop || aborting() || error.name === 'AbortError') return;
       emit({ type: 'error', id: turnId, message: error.message || 'Request failed' });
     } finally {
-      save();
       running = false;
       controller = null;
+      save();
       emit({ type: 'turn-end', id: turnId });
     }
   }
@@ -405,8 +552,13 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
       if (message.role !== 'assistant') continue;
       const turnId = id();
       const text = visible(message.content || '');
+      const calls = message.tool_calls || [];
+      if (!text.trim() && !calls.length) {
+        events.push({ type: 'error', id: turnId, message: 'The model stopped without a reply.' });
+        continue;
+      }
       if (text.trim()) events.push({ type: 'text', id: turnId, text });
-      for (const call of message.tool_calls || []) {
+      for (const call of calls) {
         let label = call.function?.name || 'tool';
         try {
           label = toolLabel(call.function.name, JSON.parse(call.function.arguments || '{}'));
@@ -420,7 +572,7 @@ function createAgent({ apiKey, model, getRoot, toolbox, emit, history = [], pers
     return events;
   }
 
-  return { send, stop, replay };
+  return { send, stop, replay, isRunning: () => running };
 }
 
 module.exports = { createAgent, splitForSummary };

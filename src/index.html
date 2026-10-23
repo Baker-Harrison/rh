@@ -19,6 +19,14 @@
   </div>
   <main id="thread"></main>
   <div id="dock">
+    <form id="key-form" hidden>
+      <input id="key-input" type="password" placeholder="OpenRouter API key" autocomplete="off" spellcheck="false" />
+      <button type="submit" id="key-save" aria-label="Save key" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 18.25V6.75M12 6.75 7.25 11.5M12 6.75l4.75 4.75" />
+        </svg>
+      </button>
+    </form>
     <form id="composer">
       <div id="folder-wrap">
         <button type="button" id="folder" aria-label="Choose folder" aria-pressed="false">

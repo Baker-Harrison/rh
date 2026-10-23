@@ -137,6 +137,9 @@ function resolveSafe(root, userPath) {
   let existing = abs;
   const pending = [];
   while (!fs.existsSync(existing)) {
+    if (fs.lstatSync(existing, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      throw new Error('Path is a broken symlink');
+    }
     const parent = path.dirname(existing);
     if (parent === existing) throw new Error('Invalid path');
     pending.push(path.basename(existing));
@@ -188,8 +191,8 @@ async function readTool(root, args) {
     throw new Error('File not found');
   }
   if (isBinary(file)) throw new Error('Cannot read a binary file');
-  const offset = Number(args.offset) || 1;
-  const limit = Number(args.limit) || MAX_READ_LINES;
+  const offset = Math.floor(Number(args.offset)) || 1;
+  const limit = Math.floor(Number(args.limit)) || MAX_READ_LINES;
   const { lines, start, total } = await readLines(file, offset, limit);
   if (total === 0) return `${args.path} is empty`;
   if (lines.length === 0) return `${args.path} has ${total} lines. offset ${start} is past the end.`;
@@ -221,10 +224,15 @@ function editTool(root, args) {
   if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error('File not found');
   if (isBinary(file)) throw new Error('Cannot edit a binary file');
   const original = fs.readFileSync(file, 'utf8');
-  const count = original.split(args.old_string).length - 1;
+  // Read hides carriage returns, so text the model copies from it uses bare \n.
+  const crlf = original.includes('\r\n') && !args.old_string.includes('\r');
+  const toFile = (text) => (crlf ? text.replace(/\n/g, '\r\n') : text);
+  const oldText = toFile(args.old_string);
+  const newText = toFile(args.new_string);
+  const count = original.split(oldText).length - 1;
   if (count === 0) throw new Error('old_string was not found');
   if (count > 1) throw new Error(`old_string appears ${count} times. Include more surrounding text so it is unique.`);
-  const next = original.replace(args.old_string, args.new_string);
+  const next = original.replace(oldText, () => newText);
   fs.writeFileSync(file, next);
   return `Edited ${args.path}`;
 }
@@ -251,7 +259,7 @@ function writeRoots(rootReal) {
   return [...roots];
 }
 
-function sandboxProfile(rootReal) {
+function sandboxProfile(rootReal, protectedPaths = []) {
   const clauses = writeRoots(rootReal).map((item) => `(subpath ${schemeQuote(item)})`).join(' ');
   return `(version 1)
 (deny default)
@@ -270,6 +278,7 @@ function sandboxProfile(rootReal) {
 (allow file-ioctl)
 (allow file-read*)
 (allow file-write* ${clauses})
+${protectedPaths.map(existingPath).filter(Boolean).map((item) => `(deny file-read* file-write* (subpath ${schemeQuote(item)}))`).join('\n')}
 (allow file-write-data (literal "/dev/null") (literal "/dev/dtracehelper") (literal "/dev/zero") (literal "/dev/tty"))
 `;
 }
@@ -286,7 +295,7 @@ function killGroup(child) {
   }, 400);
 }
 
-function bashTool(root, args, track, shouldStop) {
+function bashTool(root, args, track, shouldStop, protectedPaths) {
   const command = typeof args.command === 'string' ? args.command.trim() : '';
   if (!command) throw new Error('command is required');
   const requested = Number(args.timeout_ms);
@@ -296,13 +305,13 @@ function bashTool(root, args, track, shouldStop) {
   );
   const rootReal = fs.realpathSync(root);
   const profilePath = path.join(os.tmpdir(), `harness-sandbox-${process.pid}-${Date.now()}.sb`);
-  fs.writeFileSync(profilePath, sandboxProfile(rootReal));
+  fs.writeFileSync(profilePath, sandboxProfile(rootReal, protectedPaths));
 
   return new Promise((resolve, reject) => {
     const child = spawn('/usr/bin/sandbox-exec', ['-f', profilePath, '/bin/zsh', '-lc', command], {
       cwd: rootReal,
       env: {
-        ...process.env,
+        ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== 'OPENROUTER_API_KEY')),
         PAGER: 'cat',
         GIT_PAGER: 'cat',
         MANPAGER: 'cat',
@@ -319,6 +328,9 @@ function bashTool(root, args, track, shouldStop) {
       if (bucket.length >= MAX_OUTPUT) return bucket;
       return (bucket + chunk.toString()).slice(0, MAX_OUTPUT + 1);
     };
+    
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { stdout = take(stdout, chunk); });
     child.stderr.on('data', (chunk) => { stderr = take(stderr, chunk); });
 
@@ -338,8 +350,23 @@ function bashTool(root, args, track, shouldStop) {
       reject(error);
     });
 
-    child.on('close', (code) => {
+    let settled = false;
+    let exitTimer = null;
+    child.on('exit', () => {
+      // Background jobs can hold the pipes open; give trailing output a moment, then finish.
+      exitTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(child.exitCode);
+      }, 300);
+    });
+    child.on('close', (code) => finish(code));
+
+    function finish(code) {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(exitTimer);
       track(null);
       cleanupProfile();
       if (shouldStop()) {
@@ -351,11 +378,11 @@ function bashTool(root, args, track, shouldStop) {
       if (stderr) parts.push(stderr.trimEnd());
       if (timedOut) parts.push(`Error: command timed out after ${timeoutMs}ms`);
       resolve(clip(parts.join('\n')));
-    });
+    }
   });
 }
 
-function createToolbox(getRoot) {
+function createToolbox(getRoot, { protectedPaths = [] } = {}) {
   let active = null;
   let stopRequested = false;
 
@@ -379,7 +406,7 @@ function createToolbox(getRoot) {
         case 'Edit':
           return editTool(root, args);
         case 'Bash':
-          return bashTool(root, args, (child) => { active = child; }, () => stopRequested);
+          return bashTool(root, args, (child) => { active = child; }, () => stopRequested, protectedPaths);
         default:
           throw new Error(`Unknown tool ${name}`);
       }

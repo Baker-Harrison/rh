@@ -8,6 +8,17 @@ const { openStore } = require('./store');
 
 app.setName('Harness');
 
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  });
+}
+
 let win = null;
 let folder = null;
 
@@ -65,7 +76,7 @@ function emit(event) {
 }
 
 const config = loadConfig();
-const toolbox = createToolbox(() => folder);
+const toolbox = createToolbox(() => folder, { protectedPaths: [app.getPath('userData')] });
 let store = null;
 let agent = {
   async send() {
@@ -104,7 +115,9 @@ function createWindow() {
   });
   win.webContents.on('did-finish-load', () => {
     emit(folderInfo());
+    emit(keyInfo());
     for (const event of agent.replay()) emit(event);
+    if (agent.isRunning?.()) emit({ type: 'running' });
     if (pendingUpdate) emit(pendingUpdate);
   });
   win.loadFile(path.join(__dirname, 'index.html'));
@@ -155,6 +168,10 @@ ipcMain.on('zoom-window', (event) => {
 });
 
 ipcMain.handle('select-folder', async () => {
+  if (agent.isRunning?.()) {
+    emit({ type: 'error', id: 'folder', message: 'Stop the current turn before changing folders.' });
+    return folderInfo();
+  }
   const result = await dialog.showOpenDialog(win, {
     properties: ['openDirectory', 'createDirectory'],
   });
@@ -167,10 +184,21 @@ ipcMain.handle('select-folder', async () => {
   return info;
 });
 
+function keyInfo() {
+  return { type: 'key', present: Boolean(store && store.getApiKey()) };
+}
+
+ipcMain.handle('set-api-key', (_event, value) => {
+  if (!store || typeof value !== 'string' || !value.trim()) return { ok: false };
+  store.setApiKey(value.trim());
+  emit(keyInfo());
+  return { ok: true };
+});
+
 ipcMain.handle('send-message', async (_event, text) => {
   if (typeof text !== 'string' || !text.trim()) return { ok: false };
   if (!store || !store.getApiKey()) {
-    emit({ type: 'error', id: 'config', message: 'Set OPENROUTER_API_KEY.' });
+    emit(keyInfo());
     return { ok: false };
   }
   if (!folder || !fs.existsSync(folder)) {
@@ -198,11 +226,12 @@ ipcMain.handle('install-update', () => {
 });
 
 app.whenReady().then(() => {
+  if (!gotLock) return;
   store = openStore(path.join(app.getPath('userData'), 'harness.db'));
   if (process.env.OPENROUTER_API_KEY) store.setApiKey(process.env.OPENROUTER_API_KEY);
   folder = loadFolder();
   agent = createAgent({
-    apiKey: store.getApiKey(),
+    getApiKey: () => store.getApiKey(),
     model: config.model,
     getRoot: () => folder,
     toolbox,
@@ -216,6 +245,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('before-quit', () => {
+  agent.stop();
 });
 
 app.on('window-all-closed', () => {

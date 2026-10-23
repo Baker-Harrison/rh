@@ -200,6 +200,72 @@ body {
   padding: 8px 16px 16px;
 }
 
+#key-form {
+  max-width: 760px;
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 52px;
+  padding: 6px 6px 6px 16px;
+  background: var(--bar);
+  border: 1px solid var(--bar-border);
+  border-radius: 26px;
+}
+
+#key-form[hidden] { display: none; }
+#key-form:focus-within { border-color: rgba(255, 255, 255, 0.16); }
+
+#key-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.4;
+  padding: 8px 0;
+}
+
+#key-input::placeholder { color: #6f6f6f; }
+
+#key-save {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--faint);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+#key-save svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#key-save:disabled { cursor: default; }
+#key-save.ready {
+  background: var(--send);
+  color: var(--send-ink);
+}
+
+#key-save:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.45);
+  outline-offset: 2px;
+}
+
 #composer {
   max-width: 760px;
   margin: 0 auto;
